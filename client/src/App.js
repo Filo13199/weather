@@ -107,17 +107,18 @@ function App() {
       {selectedCity && weatherData.length > 0 && (
         <Row className="mt-4">
           {weatherData.map((source, index) => (
-            <Col key={index} md={4} className="mb-4">
-              <Card>
+            <Col key={index} xs={12} sm={6} md={4} className="mb-4">
+              <Card className="h-100">
                 <Card.Body>
                   <Card.Title>{source.source}</Card.Title>
-                  <Card.Text>
+                  <Card.Text className="text-truncate">
                     <strong>Feels Like:</strong> {source.feels_like}°C<br />
                     <strong>Temp Min:</strong> {source.temp_min}°C<br />
                     <strong>Temp Max:</strong> {source.temp_max}°C<br />
                     <strong>Pressure:</strong> {source.pressure} hPa<br />
                     <strong>Humidity:</strong> {source.humidity}%<br />
-                    <strong>Temp:</strong> {source.temp}°C
+                    <strong>Temp:</strong> {source.temp}°C<br />
+                    <strong>Estimated Temp for Next Hour:</strong> {source.pred_weather_next_hr}°C
                   </Card.Text>
                 </Card.Body>
               </Card>

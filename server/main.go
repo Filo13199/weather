@@ -88,16 +88,17 @@ var upgrader = websocket.Upgrader{
 }
 
 type UniversalWeatherData struct {
-	FeelsLike      float64             `json:"feels_like"`
-	TempMin        float64             `json:"temp_min"`
-	TempMax        float64             `json:"temp_max"`
-	Pressure       int                 `json:"pressure"`
-	Humidity       int                 `json:"humidity"`
-	Temp           float64             `json:"temp"`
-	CityName       string              `json:"city_name"`
-	History        []HourlyWeatherData `json:"history"`
-	SourceResponse interface{}         `json:"source_response"`
-	Source         string              `json:"source"`
+	FeelsLike                float64             `json:"feels_like"`
+	TempMin                  float64             `json:"temp_min"`
+	TempMax                  float64             `json:"temp_max"`
+	Pressure                 int                 `json:"pressure"`
+	Humidity                 int                 `json:"humidity"`
+	Temp                     float64             `json:"temp"`
+	CityName                 string              `json:"city_name"`
+	History                  []HourlyWeatherData `json:"history"`
+	SourceResponse           interface{}         `json:"source_response"`
+	Source                   string              `json:"source"`
+	PredictedWeatherNextHour float64             `json:"pred_weather_next_hr"`
 }
 
 type service struct {
@@ -117,26 +118,28 @@ type HourlyWeatherData struct {
 		Temperature2m string `json:"temperature_2m"`
 	} `json:"hourly_units"`
 	Hourly struct {
-		Time          []string  `json:"time"`
-		Temperature2m []float64 `json:"temperature_2m"`
+		Time                 []string  `json:"time"`
+		Temperature2m        []float64 `json:"temperature_2m"`
+		StdDevDiffPercentage []float64 `json:"std_dev_diff_percentage"`
 	} `json:"hourly"`
 	StandardDeviation float64 `json:"standard_deviation"`
 }
 
 type City struct {
-	ID             primitive.ObjectID   `bson:"_id" json:"_id"`
-	City           string               `bson:"city" json:"city"`
-	CityAscii      string               `bson:"city_ascii" json:"city_ascii"`
-	Lat            float64              `bson:"lat" json:"lat"`
-	Lng            float64              `bson:"lng" json:"lng"`
-	Country        string               `bson:"country" json:"country"`
-	ISO2           string               `bson:"iso2" json:"iso2"`
-	ISO3           string               `bson:"iso3" json:"iso3"`
-	AdminName      string               `bson:"admin_name" json:"admin_name"`
-	Capital        string               `bson:"capital" json:"capital"`
-	Population     primitive.Decimal128 `bson:"population" json:"population"`
-	IDInt          int                  `bson:"id" json:"id"`
-	HistoricalData []HourlyWeatherData  `bson:"historical_data" json:"historical_data"`
+	ID                             primitive.ObjectID   `bson:"_id" json:"_id"`
+	City                           string               `bson:"city" json:"city"`
+	CityAscii                      string               `bson:"city_ascii" json:"city_ascii"`
+	Lat                            float64              `bson:"lat" json:"lat"`
+	Lng                            float64              `bson:"lng" json:"lng"`
+	Country                        string               `bson:"country" json:"country"`
+	ISO2                           string               `bson:"iso2" json:"iso2"`
+	ISO3                           string               `bson:"iso3" json:"iso3"`
+	AdminName                      string               `bson:"admin_name" json:"admin_name"`
+	Capital                        string               `bson:"capital" json:"capital"`
+	Population                     primitive.Decimal128 `bson:"population" json:"population"`
+	IDInt                          int                  `bson:"id" json:"id"`
+	HourlyAverageStdPercentageDiff []float64            `json:"hourly_avg_std_percentage_diff" bson:"hourly_avg_std_percentage_diff"`
+	HistoricalData                 []HourlyWeatherData  `bson:"historical_data" json:"historical_data"`
 }
 
 func OpenWeatherMapToUniversalWeatherData(decoder *json.Decoder) (UniversalWeatherData, error) {
@@ -216,19 +219,16 @@ type AggregatedData struct {
 	Sources []UniversalWeatherData `json:"sources"`
 }
 
-// define a reader which will listen for
-// new messages being sent to our WebSocket
-// endpoint
 func (s *service) eventLoop(conn *websocket.Conn, city City) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	currentTime := time.Now()
 	sessionId := primitive.NewObjectID()
-	historicalData := make([]HourlyWeatherData, 0, historicalDepth)
 	if len(city.HistoricalData) == 0 {
-
+		historicalData := make([]HourlyWeatherData, 0, historicalDepth)
 		// imaginary lock here to prevent race conditions on same city
-		for i := 0; i <= historicalDepth; i++ {
+		avgStdDev := float64(0)
+		for i := 1; i <= historicalDepth; i++ {
 			historicalDataURI := fmt.Sprintf("https://archive-api.open-meteo.com/v1/archive?latitude=%f&longitude=%f&start_date=%d-%d-%d&end_date=%d-%d-%d&hourly=temperature_2m", city.Lat, city.Lng, currentTime.Year()-i, currentTime.Month(), currentTime.Day(), currentTime.Year()-i, currentTime.Month(), currentTime.Day())
 			req, err := http.NewRequest(http.MethodGet, historicalDataURI, nil)
 			if err != nil {
@@ -241,37 +241,57 @@ func (s *service) eventLoop(conn *websocket.Conn, city City) {
 			if err != nil {
 				log.Fatal(trace(1), err)
 			}
+
 			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
 				log.Println(trace(1), "status code error: %d %s", resp.StatusCode, resp.Status)
 			}
-			var historicalDataRes HourlyWeatherData
-			if err := json.NewDecoder(resp.Body).Decode(&historicalDataRes); err != nil {
+
+			var h HourlyWeatherData
+			if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
 				log.Fatal(trace(1), err)
 			}
-			historicalData = append(historicalData, historicalDataRes)
-		}
-		col := s.mongo.Database("weather").Collection("cities")
-		avgStdDev := float64(0)
-		for i, h := range historicalData {
+
 			tempSum := float64(0)
 			for _, t := range h.Hourly.Temperature2m {
 				tempSum += t
 			}
+
 			meanTemp := tempSum / float64(len(h.Hourly.Temperature2m))
 			devs := float64(0)
 			for _, t := range h.Hourly.Temperature2m {
 				variance := t - meanTemp
 				devs += math.Pow(variance, 2)
 			}
-			devs = devs / float64(len(h.HourlyUnits.Temperature2m))
+
+			devs = devs / float64(len(h.Hourly.Temperature2m))
 			stdDev := math.Sqrt(devs)
 			avgStdDev += stdDev
+			for j := 1; j < len(h.Hourly.Temperature2m); j++ {
+				diff := h.Hourly.Temperature2m[j] - h.Hourly.Temperature2m[j-1]
+				differenceFromStdDevPercentage := (diff / stdDev)
+				h.Hourly.StdDevDiffPercentage = append(h.Hourly.StdDevDiffPercentage, differenceFromStdDevPercentage)
+			}
+
 			fmt.Printf("standard deviation for %s on %s is = %f \n", city.City, h.Hourly.Time[0], stdDev)
-			historicalData[i].StandardDeviation = stdDev
+			h.StandardDeviation = stdDev
+			historicalData = append(historicalData, h)
 		}
-		col.UpdateByID(context.TODO(), city.ID, bson.M{"$set": bson.M{"historical_data": historicalData, "avg_std_dev": avgStdDev / float64(len(historicalData))}})
+
+		hourlyAvgStdDiffPercentage := []float64{}
+		for j := 0; j < 23; j++ {
+			sum := float64(0)
+			for i := 0; i < len(historicalData); i++ {
+				sum += historicalData[i].Hourly.StdDevDiffPercentage[j]
+			}
+			hourlyAvgStdDiffPercentage = append(hourlyAvgStdDiffPercentage, sum/float64(len(historicalData)))
+		}
+
+		col := s.mongo.Database("weather").Collection("cities")
+		col.UpdateByID(context.TODO(), city.ID, bson.M{"$set": bson.M{"historical_data": historicalData, "avg_std_dev": avgStdDev / float64(len(historicalData)), "hourly_avg_std_percentage_diff": hourlyAvgStdDiffPercentage}})
+		city.HistoricalData = historicalData
+		city.HourlyAverageStdPercentageDiff = hourlyAvgStdDiffPercentage
 	}
 	sources := []Source{
 		{
@@ -295,6 +315,9 @@ func (s *service) eventLoop(conn *websocket.Conn, city City) {
 				log.Printf("[%s], [error =%s], [source = %s]", trace(2), err, source.Source)
 				continue
 			}
+
+			i := (time.Now().Hour() + 1) % 23
+			u.PredictedWeatherNextHour = u.Temp * (1 + city.HourlyAverageStdPercentageDiff[i])
 			universalDataArr = append(universalDataArr, u)
 		}
 
