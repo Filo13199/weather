@@ -1,0 +1,1 @@
+mongorestore --gzip ./docker-entrypoint-initdb.d/dump

@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:latest
+    container_name: mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./data:/data/db
+      - ./mongo/init.d/dump:/docker-entrypoint-initdb.d/dump/
+      - ./mongo/init.d:/docker-entrypoint-initdb.d
+  backend:
+    build: .
+    container_name: backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongo
+    environment:
+      - MONGO_DB_URI=mongodb://mongo:27017
+      - OPEN_WEATHER_MAP_SECRET_KEY=${SECRET_KEY}
