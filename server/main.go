@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -34,25 +35,29 @@ func (s *service) eventLoop(conn *websocket.Conn, city City) {
 			historicalDataURI := fmt.Sprintf("https://archive-api.open-meteo.com/v1/archive?latitude=%f&longitude=%f&start_date=%d-%d-%d&end_date=%d-%d-%d&hourly=temperature_2m", city.Lat, city.Lng, currentTime.Year()-i, currentTime.Month(), currentTime.Day(), currentTime.Year()-i, currentTime.Month(), currentTime.Day())
 			req, err := http.NewRequest(http.MethodGet, historicalDataURI, nil)
 			if err != nil {
-				log.Fatal(trace(1), err)
+				log.Println(trace(1), err)
+				continue
 			}
 
 			fmt.Println(historicalDataURI)
 			client := &http.Client{}
 			resp, err := client.Do(req)
 			if err != nil {
-				log.Fatal(trace(1), err)
+				log.Println(trace(1), err)
+				continue
 			}
 
 			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
 				log.Println(trace(1), "status code error: %d %s", resp.StatusCode, resp.Status)
+				continue
 			}
 
 			var h HourlyWeatherData
 			if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
-				log.Fatal(trace(1), err)
+				log.Println(trace(1), err)
+				continue
 			}
 
 			tempSum := float64(0)
@@ -131,7 +136,8 @@ func (s *service) eventLoop(conn *websocket.Conn, city City) {
 		// this could be replaced by more mature persistance strategy, maybe producing event on kafka and then doing whatever with it
 		_, err := col.UpdateByID(context.TODO(), sessionId, bson.M{"$push": bson.M{"sessionEvents": res}, "$set": bson.M{"cityId": city.ID}}, options.Update().SetUpsert(true))
 		if err != nil {
-			log.Fatal(trace(2), err)
+			log.Println(trace(2), err)
+			return
 		}
 
 		if err := conn.WriteJSON(res); err != nil {
@@ -144,18 +150,20 @@ func (s *service) eventLoop(conn *websocket.Conn, city City) {
 func getDataFromSource(source Source, convertFn func(*json.Decoder) (UniversalWeatherData, error)) (UniversalWeatherData, error) {
 	req, err := http.NewRequest(http.MethodGet, source.URI, nil)
 	if err != nil {
-		log.Fatal(trace(2), err)
+		return UniversalWeatherData{}, err
 	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatal(trace(2), err)
+		return UniversalWeatherData{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Fatalf("status code error: %d %s", resp.StatusCode, resp.Status)
+		log.Printf("status code error: %d %s", resp.StatusCode, resp.Status)
+		return UniversalWeatherData{}, errors.New("invalid_data")
+
 	}
 	return convertFn(json.NewDecoder(resp.Body))
 }
